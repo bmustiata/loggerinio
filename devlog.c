@@ -4,13 +4,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <cstdarg>
-#include <cstring>
 #include <errno.h>
 #include <string.h>
-#include <chrono>
 #include <stdlib.h>
-#include <cctype>
+#include <stdarg.h>
+#include <ctype.h>
+#include <sys/time.h>
 
 #ifdef _WIN32
 #define DEV_LOG_DEFAULT_OUTPUT_PATH "c:/temp/devlog.txt"
@@ -20,27 +19,27 @@
 
 #define DEV_LOG_READ_CONFIG_POLL_MS 5000l
 
-char** DEV_LOG_EXCLUDED_MATCHES = nullptr;
+char** DEV_LOG_EXCLUDED_MATCHES = 0;
 int dev_excluded_matches_count = 0;
 char dev_log_config_file[8192] = {};
-bool dev_log_initial_config_happened = false;
+unsigned char dev_log_initial_config_happened = 0;
 
 long long dev_last_time_config_was_read = -1;
 long long dev_readed_config_file_mtime = -1;
 
 // forward definitions
 void dev_log_output_line(const char *, ...);
-inline bool dev_is_line_excluded(const char*);
+unsigned char dev_is_line_excluded(const char*);
 void dev_log_line_into_output(const char*);
-bool dev_log_last_time_config_read_was_long_ago();
-bool dev_log_config_file_has_changed();
+unsigned char dev_log_last_time_config_read_was_long_ago();
+unsigned char dev_log_config_file_has_changed();
 void dev_log_reread_config_file_for_exclusions();
 long long dev_log_fstat_mtime_ms(const char*);
 long long dev_log_current_time_ms();
 void dev_log_initial_config();
 
 typedef struct {
-    bool changed;
+    unsigned char changed;
     long long timestamp;
 } config_file_change;
 
@@ -52,7 +51,7 @@ typedef struct {
  */
 void dev_log_line(const char *format, ...) {
     if (!dev_log_initial_config_happened) {
-        dev_log_initial_config_happened = true;
+        dev_log_initial_config_happened = 1;
         dev_log_initial_config();
     }
 
@@ -115,14 +114,14 @@ void dev_log_output_line(const char *format, ...) {
  * Checks against all the excluded matches that were configured if the
  * line should't make it into the output.
  */
-inline bool dev_is_line_excluded(const char* line) {
+inline unsigned char dev_is_line_excluded(const char* line) {
     for (size_t i = 0; i < dev_excluded_matches_count; i++) {
         if (strstr(line, DEV_LOG_EXCLUDED_MATCHES[i])) {
-            return true;
+            return 1;
         }
     }
 
-    return false;
+    return 0;
 }
 
 /**
@@ -135,22 +134,22 @@ void dev_log_line_into_output(const char* line) {
 /**
  * Check if the config was read a while back.
  */
-bool dev_log_last_time_config_read_was_long_ago() {
+unsigned char dev_log_last_time_config_read_was_long_ago() {
     if (dev_last_time_config_was_read < 0) {
-        return true;
+        return 1;
     }
 
     if ((dev_log_current_time_ms() - dev_last_time_config_was_read) > DEV_LOG_READ_CONFIG_POLL_MS) {
-        return true;
+        return 1;
     }
 
-    return false;
+    return 0;
 }
 
 /**
  * Check if the config file has changed.
  */
-bool dev_log_config_file_has_changed() {
+unsigned char dev_log_config_file_has_changed() {
     long long current_config_file_mtime = dev_log_fstat_mtime_ms(dev_log_config_file);
     return current_config_file_mtime != dev_readed_config_file_mtime;
 }
@@ -177,7 +176,7 @@ void dev_log_reread_config_file_for_exclusions() {
     dev_log_output_line("DEVLOG: reading config file: %s", dev_log_config_file);
 
     FILE* config_file = fopen(dev_log_config_file, "r");
-    char* line = nullptr;
+    char* line = 0;
     size_t size = 0;
 
     if (!config_file) {
@@ -190,7 +189,7 @@ void dev_log_reread_config_file_for_exclusions() {
     if (DEV_LOG_EXCLUDED_MATCHES) {
         for (int i = 0; i < dev_excluded_matches_count; i++) {
             free(DEV_LOG_EXCLUDED_MATCHES[i]);
-            DEV_LOG_EXCLUDED_MATCHES[i] = nullptr;
+            DEV_LOG_EXCLUDED_MATCHES[i] = 0;
         }
 
         free(DEV_LOG_EXCLUDED_MATCHES);
@@ -198,11 +197,10 @@ void dev_log_reread_config_file_for_exclusions() {
 
     // read the lines into our array
     while(getline(&line, &size, config_file) >= 0) {
-        DEV_LOG_EXCLUDED_MATCHES = static_cast<char **>(realloc(DEV_LOG_EXCLUDED_MATCHES,
-                                                                ++dev_excluded_matches_count * sizeof(void *)));
+        DEV_LOG_EXCLUDED_MATCHES = (char **)realloc(DEV_LOG_EXCLUDED_MATCHES, ++dev_excluded_matches_count * sizeof(void *));
         DEV_LOG_EXCLUDED_MATCHES[dev_excluded_matches_count - 1] = rtrim(line);
 
-        line = nullptr;
+        line = 0;
         size = 0;
     }
 
@@ -216,10 +214,12 @@ void dev_log_reread_config_file_for_exclusions() {
  * @return
  */
 long long dev_log_current_time_ms() {
-    using namespace std::chrono;
+    struct timeval  tv;
+    gettimeofday(&tv, NULL);
 
-    long millisec_since_epoch = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-    return millisec_since_epoch;
+    long long time_in_millis = (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000;
+
+    return time_in_millis;
 }
 
 /**
