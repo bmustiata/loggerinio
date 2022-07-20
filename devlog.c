@@ -1,8 +1,6 @@
 #include "devlog.h"
 
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
@@ -10,19 +8,23 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <sys/time.h>
+#include <time.h>
+#include <math.h>
 
 #ifdef _WIN32
-#define DEV_LOG_DEFAULT_OUTPUT_PATH "c:/temp/devlog.txt"
+#define DEV_LOG_DEFAULT_OUTPUT_PATH "C:\\temp\\devlog.log"
 #else
-#define DEV_LOG_DEFAULT_OUTPUT_PATH "/tmp/devlog.txt"
+#define DEV_LOG_DEFAULT_OUTPUT_PATH "/tmp/devlog.log"
 #endif
 
-#define DEV_LOG_READ_CONFIG_POLL_MS 5000l
+#define DEV_LOG_READ_CONFIG_POLL_MS 5000L
 
 char** DEV_LOG_EXCLUDED_MATCHES = 0;
 int dev_excluded_matches_count = 0;
-char dev_log_config_file[8192] = {};
+char dev_log_config_file_name[8192] = {};
+char dev_log_output_file_name[8192] = {};
 unsigned char dev_log_initial_config_happened = 0;
+FILE* dev_log_output_file = 0;
 
 long long dev_last_time_config_was_read = -1;
 long long dev_readed_config_file_mtime = -1;
@@ -37,11 +39,7 @@ void dev_log_reread_config_file_for_exclusions();
 long long dev_log_fstat_mtime_ms(const char*);
 long long dev_log_current_time_ms();
 void dev_log_initial_config();
-
-typedef struct {
-    unsigned char changed;
-    long long timestamp;
-} config_file_change;
+FILE* dev_log_output();
 
 /**
  * Log the line into the output. If it's excluded, it won't be logged.
@@ -79,19 +77,26 @@ void dev_log_line(const char *format, ...) {
  */
 void dev_log_initial_config() {
     const char* config_file = getenv("DEV_LOG_CONFIG_FILE");
+    const char* output_file = getenv("DEV_LOG_OUTPUT_FILE");
     const char* home_folder = getenv("HOME");
 
     if (config_file) {
-        strcpy(dev_log_config_file, config_file);
+        strcpy(dev_log_config_file_name, config_file);
     } else {
 #ifdef _WIN32
-        snprintf(dev_log_config_file, sizeof(dev_log_config_file), "%s\\%s", home_folder, "devlog.txt");
+        snprintf(dev_log_config_file_name, sizeof(dev_log_config_file_name), "%s\\%s", home_folder, "devlog.txt");
 #else
-        snprintf(dev_log_config_file, sizeof(dev_log_config_file), "%s/%s", home_folder, ".devlog");
+        snprintf(dev_log_config_file_name, sizeof(dev_log_config_file_name), "%s/%s", home_folder, ".devlog");
 #endif
     }
 
-    dev_log_output_line("DEVLOG: using config file: %s", dev_log_config_file);
+    if (output_file) {
+        strcpy(dev_log_output_file_name, output_file);
+    } else {
+        strcpy(dev_log_output_file_name, DEV_LOG_DEFAULT_OUTPUT_PATH);
+    }
+
+    dev_log_output_line("DEVLOG: using config file: %s", dev_log_config_file_name);
     dev_log_reread_config_file_for_exclusions();
 }
 
@@ -128,7 +133,31 @@ inline unsigned char dev_is_line_excluded(const char* line) {
  * Log the line into the output
  */
 void dev_log_line_into_output(const char* line) {
-    printf("%s\n", line);
+    // FILE* output_file = dev_log_get_output();
+    char time[30] = {0};
+
+#ifdef _WIN32
+#else
+    int ms;
+    struct timeval tv;
+    struct tm *tm;
+    char buffer[26];
+
+    gettimeofday(&tv, NULL);
+
+    ms = (int) (tv.tv_usec/1000.0);
+    if (ms>=1000) {
+        ms -= 1000;
+        tv.tv_sec++;
+    }
+
+    tm = localtime(&tv.tv_sec);
+
+    strftime(buffer, 26, "%Y%m%d/%H%M%S", tm);
+    snprintf(time, sizeof time, "%s.%03d", buffer, ms);
+#endif
+
+    fprintf(dev_log_output(), "%s - %s\n", time, line);
 }
 
 /**
@@ -150,7 +179,7 @@ unsigned char dev_log_last_time_config_read_was_long_ago() {
  * Check if the config file has changed.
  */
 unsigned char dev_log_config_file_has_changed() {
-    long long current_config_file_mtime = dev_log_fstat_mtime_ms(dev_log_config_file);
+    long long current_config_file_mtime = dev_log_fstat_mtime_ms(dev_log_config_file_name);
     return current_config_file_mtime != dev_readed_config_file_mtime;
 }
 
@@ -173,15 +202,15 @@ char* rtrim(char* s){
 void dev_log_reread_config_file_for_exclusions() {
     dev_last_time_config_was_read = dev_log_current_time_ms();
 
-    dev_log_output_line("DEVLOG: reading config file: %s", dev_log_config_file);
+    dev_log_output_line("DEVLOG: reading config file: %s", dev_log_config_file_name);
 
-    FILE* config_file = fopen(dev_log_config_file, "r");
+    FILE* config_file = fopen(dev_log_config_file_name, "r");
     char* line = 0;
     size_t size = 0;
 
     if (!config_file) {
-        dev_log_output_line("DEVLOG: failure reading config file: %s",
-                            dev_log_config_file, errno, strerror(errno));
+        dev_log_output_line("DEVLOG: failure reading config file: %s (%d - %s)",
+                            dev_log_config_file_name, errno, strerror(errno));
         return;
     }
 
@@ -196,7 +225,7 @@ void dev_log_reread_config_file_for_exclusions() {
     }
 
     // read the lines into our array
-    while(getline(&line, &size, config_file) >= 0) {
+    while (getline(&line, &size, config_file) >= 0) {
         DEV_LOG_EXCLUDED_MATCHES = (char **)realloc(DEV_LOG_EXCLUDED_MATCHES, ++dev_excluded_matches_count * sizeof(void *));
         DEV_LOG_EXCLUDED_MATCHES[dev_excluded_matches_count - 1] = rtrim(line);
 
@@ -206,7 +235,7 @@ void dev_log_reread_config_file_for_exclusions() {
 
     fclose(config_file);
 
-    dev_log_output_line("DEVLOG: done reading config file: %s", dev_log_config_file);
+    dev_log_output_line("DEVLOG: done reading config file: %s", dev_log_config_file_name);
 }
 
 /**
@@ -239,14 +268,11 @@ long long dev_log_fstat_mtime_ms(const char* file_name) {
     return statbuf.st_mtime * 1000LL;
 }
 
-int main(int argc, const char* argv[]) {
-    dev_log_line("time is: %lld", dev_log_fstat_mtime_ms("/etc/passwd"));
-    dev_log_line("what %s is %s", "the heck", "this");
-    dev_log_line("what %s is %s", "the heck", "that");
-    dev_log_line("what %s is %s", "the heck", "it");
-    dev_log_line("what %s is %s", "the heck", "she");
-    dev_log_line("what %s is %s", "the heck", "he");
+FILE* dev_log_output() {
+    if (dev_log_output_file) {
+        return dev_log_output_file;
+    }
 
-    return 0;
+    dev_log_output_file = fopen(dev_log_output_file_name, "a");
+    return dev_log_output_file;
 }
-
