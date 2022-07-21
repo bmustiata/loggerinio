@@ -7,4 +7,4 @@ include_directories(.)
 
 add_executable(loggerinio
         devlog.c
-        devlog.h)
+        devlog.h basictest.c)

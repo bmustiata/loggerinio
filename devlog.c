@@ -1,4 +1,8 @@
-#include "devlog.h"
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS 1
+#pragma warning( push )
+#pragma warning( disable : 4018 4267)
+#endif
 
 #include <sys/stat.h>
 #include <stdio.h>
@@ -7,9 +11,14 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <ctype.h>
-#include <sys/time.h>
 #include <time.h>
 #include <math.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/time.h>
+#endif
 
 #ifdef _WIN32
 #define DEV_LOG_DEFAULT_OUTPUT_PATH "C:\\temp\\devlog.log"
@@ -20,9 +29,9 @@
 #define DEV_LOG_READ_CONFIG_POLL_MS 5000L
 
 char** DEV_LOG_EXCLUDED_MATCHES = 0;
-int dev_excluded_matches_count = 0;
-char dev_log_config_file_name[8192] = {};
-char dev_log_output_file_name[8192] = {};
+unsigned int dev_excluded_matches_count = 0;
+char dev_log_config_file_name[8192];
+char dev_log_output_file_name[8192];
 unsigned char dev_log_initial_config_happened = 0;
 FILE* dev_log_output_file = 0;
 
@@ -78,13 +87,19 @@ void dev_log_line(const char *format, ...) {
 void dev_log_initial_config() {
     const char* config_file = getenv("DEV_LOG_CONFIG_FILE");
     const char* output_file = getenv("DEV_LOG_OUTPUT_FILE");
+
+#ifdef _WIN32
+    const char* home_folder = getenv("USERPROFILE");
+#else
     const char* home_folder = getenv("HOME");
+#endif
 
     if (config_file) {
         strcpy(dev_log_config_file_name, config_file);
-    } else {
+    }
+    else {
 #ifdef _WIN32
-        snprintf(dev_log_config_file_name, sizeof(dev_log_config_file_name), "%s\\%s", home_folder, "devlog.txt");
+        snprintf(dev_log_config_file_name, sizeof(dev_log_config_file_name), "%s\\%s", home_folder, "devlog.cfg");
 #else
         snprintf(dev_log_config_file_name, sizeof(dev_log_config_file_name), "%s/%s", home_folder, ".devlog");
 #endif
@@ -92,7 +107,8 @@ void dev_log_initial_config() {
 
     if (output_file) {
         strcpy(dev_log_output_file_name, output_file);
-    } else {
+    }
+    else {
         strcpy(dev_log_output_file_name, DEV_LOG_DEFAULT_OUTPUT_PATH);
     }
 
@@ -129,35 +145,116 @@ inline unsigned char dev_is_line_excluded(const char* line) {
     return 0;
 }
 
+#ifdef _WIN32
+
+#include <stdint.h>
+
+void convert_filetime(struct timeval *out_tv, const FILETIME *filetime)
+{
+  // Microseconds between 1601-01-01 00:00:00 UTC and 1970-01-01 00:00:00 UTC
+  static const uint64_t EPOCH_DIFFERENCE_MICROS = 11644473600000000ull;
+
+  // First convert 100-ns intervals to microseconds, then adjust for the
+  // epoch difference
+  uint64_t total_us = (((uint64_t)filetime->dwHighDateTime << 32) | (uint64_t)filetime->dwLowDateTime) / 10;
+  total_us -= EPOCH_DIFFERENCE_MICROS;
+
+  // Convert to (seconds, microseconds)
+  out_tv->tv_sec = (long) (total_us / 1000000);
+  out_tv->tv_usec = (long) (total_us % 1000000);
+}
+
+static int gettimeofday(struct timeval* tp, struct timezone* tzp) {
+  FILETIME file_time;
+  GetSystemTimePreciseAsFileTime(&file_time);
+
+  convert_filetime(tp, &file_time);
+
+  return 0;
+}
+
+size_t getline(char **lineptr, size_t *n, FILE *stream) {
+  char *bufptr = NULL;
+  char *p = bufptr;
+  size_t size;
+  int c;
+
+  if (lineptr == NULL) {
+    return -1;
+  }
+  if (stream == NULL) {
+    return -1;
+  }
+  if (n == NULL) {
+    return -1;
+  }
+  bufptr = *lineptr;
+  size = *n;
+
+  c = fgetc(stream);
+  if (c == EOF) {
+    return -1;
+  }
+  if (bufptr == NULL) {
+    bufptr = (char*) malloc(128);
+    if (bufptr == NULL) {
+      return -1;
+    }
+    size = 128;
+  }
+  p = bufptr;
+  while (c != EOF) {
+    if ((p - bufptr) > (size - 1)) {
+      size = size + 128;
+      bufptr = (char*) realloc(bufptr, size);
+      if (bufptr == NULL) {
+        return -1;
+      }
+    }
+    *p++ = c;
+    if (c == '\n') {
+      break;
+    }
+    c = fgetc(stream);
+  }
+
+  *p++ = '\0';
+  *lineptr = bufptr;
+  *n = size;
+
+  return p - bufptr - 1;
+}
+#endif
+
 /**
  * Log the line into the output
  */
 void dev_log_line_into_output(const char* line) {
     // FILE* output_file = dev_log_get_output();
-    char time[30] = {0};
+    char result[30] = { 0 };
 
-#ifdef _WIN32
-#else
-    int ms;
+    int millis;
     struct timeval tv;
-    struct tm *tm;
     char buffer[26];
+
+    time_t rawtime;
+    struct tm *tm_info;
 
     gettimeofday(&tv, NULL);
 
-    ms = (int) (tv.tv_usec/1000.0);
-    if (ms>=1000) {
-        ms -= 1000;
+    millis = (int)(tv.tv_usec / 1000.0);
+    if (millis >= 1000) {
+        millis -= 1000;
         tv.tv_sec++;
     }
 
-    tm = localtime(&tv.tv_sec);
+    time(&rawtime);
+    tm_info = localtime(&rawtime);
 
-    strftime(buffer, 26, "%Y%m%d/%H%M%S", tm);
-    snprintf(time, sizeof time, "%s.%03d", buffer, ms);
-#endif
+    strftime(buffer, 26, "%Y%m%d/%H%M%S", tm_info);
+    snprintf(result, sizeof result, "%s.%03d", buffer, millis);
 
-    fprintf(dev_log_output(), "%s - %s\n", time, line);
+    fprintf(dev_log_output(), "%s - %s\n", result, line);
 }
 
 /**
@@ -183,7 +280,7 @@ unsigned char dev_log_config_file_has_changed() {
     return current_config_file_mtime != dev_readed_config_file_mtime;
 }
 
-char* rtrim(char* s){
+char* dev_log_rtrim(char* s) {
     for (long i = strlen(s) - 1; i >= 0; i--) {
         if (!isspace(s[i])) {
             break;
@@ -227,7 +324,7 @@ void dev_log_reread_config_file_for_exclusions() {
     // read the lines into our array
     while (getline(&line, &size, config_file) >= 0) {
         DEV_LOG_EXCLUDED_MATCHES = (char **)realloc(DEV_LOG_EXCLUDED_MATCHES, ++dev_excluded_matches_count * sizeof(void *));
-        DEV_LOG_EXCLUDED_MATCHES[dev_excluded_matches_count - 1] = rtrim(line);
+        DEV_LOG_EXCLUDED_MATCHES[dev_excluded_matches_count - 1] = dev_log_rtrim(line);
 
         line = 0;
         size = 0;
@@ -243,7 +340,7 @@ void dev_log_reread_config_file_for_exclusions() {
  * @return
  */
 long long dev_log_current_time_ms() {
-    struct timeval  tv;
+    struct timeval tv;
     gettimeofday(&tv, NULL);
 
     long long time_in_millis = (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000;
@@ -257,11 +354,11 @@ long long dev_log_current_time_ms() {
  * @return
  */
 long long dev_log_fstat_mtime_ms(const char* file_name) {
-    struct stat statbuf = {};
+    struct stat statbuf;
 
     if (stat(file_name, &statbuf) < 0) {
         dev_log_output_line("DEVLOG: unable to stat %s, errno: %d, %s",
-                file_name, errno, strerror(errno));
+                            file_name, errno, strerror(errno));
         return -1;
     }
 
@@ -276,3 +373,7 @@ FILE* dev_log_output() {
     dev_log_output_file = fopen(dev_log_output_file_name, "a");
     return dev_log_output_file;
 }
+
+#ifdef _WIN32
+#pragma warning( pop )
+#endif
